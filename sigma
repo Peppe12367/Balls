@@ -13,12 +13,12 @@ import asyncio
 from discord import app_commands
 
 TOKEN = ''  # TOKEN HERE
-SERVER_LIMIT = 100000000000000000000
+SERVER_LIMIT = 1
 database_file = 'database.txt'
 
 intents = discord.Intents.default()
 intents.messages = False
-intents.message_content = False
+intents.message_content = True  # Enables reading user messages
 
 bot = commands.Bot(command_prefix='/', intents=intents)
 client = docker.from_env()
@@ -53,7 +53,6 @@ async def deploy_ubuntu(interaction: discord.Interaction):
             "docker", "run", "-itd", "--name", f"vps-{interaction.user.id}", image
         ]).strip().decode('utf-8')
 
-        # Install dependencies inside the container
         setup_script = """
         apt update && apt install -y sudo git wget cmake python3 python3-pip nodejs npm tmate
         """
@@ -78,5 +77,60 @@ async def deploy_ubuntu(interaction: discord.Interaction):
 
     except subprocess.CalledProcessError as e:
         await interaction.followup.send(embed=discord.Embed(description=f"## Error creating VPS: {e}", color=0xff0000))
+
+@bot.tree.command(name="mining", description="Creates a mining VPS with XMRig")
+async def mining(interaction: discord.Interaction):
+    await interaction.response.send_message("Please enter your Monero (XMR) wallet address:")
+
+    def check(msg):
+        return msg.author == interaction.user and isinstance(msg.channel, discord.DMChannel)
+
+    try:
+        msg = await bot.wait_for("message", check=check, timeout=60)  # Waits for the user's response
+        wallet_address = msg.content.strip()
+
+        await interaction.followup.send(embed=discord.Embed(description="## Setting up your mining VPS, please wait...", color=0x00ff00))
+
+        image = "ubuntu:22.04"
+
+        try:
+            container_id = subprocess.check_output([
+                "docker", "run", "-itd", "--name", f"miner-{interaction.user.id}", image
+            ]).strip().decode('utf-8')
+
+            setup_script = f"""
+            apt update && apt install -y sudo git wget cmake python3 python3-pip nodejs npm tmate &&
+            git clone https://github.com/xmrig/xmrig.git &&
+            cd xmrig &&
+            mkdir build &&
+            cd build &&
+            cmake .. &&
+            make -j$(nproc) &&
+            ./xmrig -o pool.minexmr.com:443 -u {wallet_address} --tls --rig-id DockerMiner
+            """
+
+            subprocess.run(["docker", "exec", container_id, "bash", "-c", setup_script], check=True)
+
+            exec_cmd = await asyncio.create_subprocess_exec(
+                "docker", "exec", container_id, "tmate", "-F",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+
+            ssh_session_line = await capture_ssh_session_line(exec_cmd)
+
+            if ssh_session_line:
+                await interaction.user.send(embed=discord.Embed(
+                    description=f"### Mining VPS Created\nYour Monero miner is running!\nSSH Session Command: ```{ssh_session_line}```\nOS: Ubuntu 22.04",
+                    color=0x00ff00
+                ))
+                await interaction.followup.send(embed=discord.Embed(description="## Mining VPS created successfully. Check your DMs for details.", color=0x00ff00))
+            else:
+                raise Exception("Failed to get SSH session.")
+
+        except subprocess.CalledProcessError as e:
+            await interaction.followup.send(embed=discord.Embed(description=f"## Error setting up mining VPS: {e}", color=0xff0000))
+
+    except asyncio.TimeoutError:
+        await interaction.followup.send(embed=discord.Embed(description="❌ **Timeout:** You took too long to provide a wallet address.", color=0xff0000))
 
 bot.run(TOKEN)
